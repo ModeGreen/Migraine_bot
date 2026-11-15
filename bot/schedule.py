@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import tzinfo as ZoneInfo  # любой tzinfo: ZoneInfo или фиксированное смещение
 
 log = logging.getLogger(__name__)
 
@@ -13,7 +13,11 @@ QUESTIONS_AUTOCLOSE = timedelta(hours=24)
 
 
 def compute_next(user: dict, tz: ZoneInfo, after: datetime, extra_days: int = 0) -> datetime:
-    """Ближайший момент poll_time (по местному времени) строго после `after`, плюс extra_days."""
+    """Ближайший момент poll_time (по местному времени пользователя) строго после `after`,
+    плюс extra_days. `tz` — пояс по умолчанию, если пользователь свой ещё не указал."""
+    from .tz import user_tz
+
+    tz = user_tz(user, tz)
     hh, mm = (int(x) for x in user["poll_time"].split(":"))
     local = after.astimezone(tz)
     candidate = datetime.combine(local.date(), time(hh, mm), tzinfo=tz)

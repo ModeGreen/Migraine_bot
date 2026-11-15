@@ -28,6 +28,26 @@ NOTES_KB = ReplyKeyboardMarkup(
 )
 
 
+BTN_TZ_LIST = "🌐 Выбрать город из списка"
+BTN_TZ_LATER = "⏭ Позже"
+
+TZ_REQUEST_KB = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="📍 Отправить геопозицию", request_location=True)],
+              [KeyboardButton(text=BTN_TZ_LIST)],
+              [KeyboardButton(text=BTN_TZ_LATER)]],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+)
+
+
+def tz_list_kb() -> "InlineKeyboardMarkup":
+    from .tz import TZ_CHOICES
+
+    rows = _rows([IB(text=label, callback_data=f"tz:{name}") for label, name in TZ_CHOICES], 2)
+    rows.append([IB(text="🕐 Другой — укажу, сколько у меня времени", callback_data="tz:other")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _rows(buttons: list[IB], columns: int) -> list[list[IB]]:
     columns = max(1, columns)
     return [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
@@ -77,7 +97,8 @@ def settings_kb(paused: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [IB(text="🔁 Частота", callback_data="set:freq"),
          IB(text="🕘 Время", callback_data="set:time")],
-        [IB(text="▶️ Возобновить опросы" if paused else "⏸ Приостановить опросы",
+        [IB(text="🌍 Часовой пояс", callback_data="set:tz"),
+         IB(text="▶️ Возобновить опросы" if paused else "⏸ Приостановить опросы",
             callback_data="set:pause")],
         [IB(text="🔔 Спросить сейчас", callback_data="set:now"),
          IB(text="🗂 Последняя запись", callback_data="set:last")],

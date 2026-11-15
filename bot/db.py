@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS users (
     poll_time     TEXT    NOT NULL DEFAULT '21:00',
     paused        INTEGER NOT NULL DEFAULT 0,
     next_poll_at  TEXT,
+    tz            TEXT,                    -- «Europe/Moscow» или «UTC+03:00»; NULL — пояс по умолчанию
+    awaiting      TEXT,                    -- чего бот ждёт текстом вне записи: 'tz_time'
     created_at    TEXT    NOT NULL
 );
 
@@ -80,7 +82,20 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Добавляет колонки, появившиеся в новых версиях, в уже существующую базу."""
+        wanted = {
+            "users": {"tz": "TEXT", "awaiting": "TEXT"},
+            "entries": {"q_message_id": "INTEGER"},
+        }
+        for table, cols in wanted.items():
+            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            for col, typ in cols.items():
+                if col not in have:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
     def _exec(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         cur = self.conn.execute(sql, params)

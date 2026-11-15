@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import timedelta, tzinfo
 from html import escape
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -25,6 +25,7 @@ from .export import build_csv, build_markdown
 from .questions import Question, Questionnaire
 from .schedule import compute_next
 from .transcribe import Transcriber
+from .tz import tz_from_local_time, tz_from_location, tz_label, user_tz
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -67,14 +68,20 @@ class AccessMiddleware(BaseMiddleware):
 
 
 # ---------------------------------------------------------------- вспомогательное
-def fmt_local(ts: str, cfg: Config, with_weekday: bool = False) -> str:
-    dt = from_iso(ts).astimezone(cfg.tz)
+def utz(user: dict | None, cfg: Config) -> tzinfo:
+    """Часовой пояс пользователя (или пояс по умолчанию, пока он не указан)."""
+    return user_tz(user, cfg.tz)
+
+
+def fmt_local(ts: str, tz: tzinfo, with_weekday: bool = False) -> str:
+    dt = from_iso(ts).astimezone(tz)
     wd = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"][dt.weekday()] + " " if with_weekday else ""
     return f"{wd}{dt:%d.%m %H:%M}"
 
 
 def entry_summary(entry: dict, db: DB, qn: Questionnaire, cfg: Config) -> str:
-    lines = [f"<b>🤕 Приступ, запись от {fmt_local(entry['created_at'], cfg, True)}</b>"]
+    tz = utz(db.get_user(entry["user_id"]), cfg)
+    lines = [f"<b>🤕 Приступ, запись от {fmt_local(entry['created_at'], tz, True)}</b>"]
     for q in qn.questions:
         lines.append(f"• {escape(q.label)}: {escape(q.answer_to_text(entry['answers'].get(q.id)))}")
     notes = db.notes_for(entry["id"])
@@ -113,7 +120,7 @@ async def send_poll(bot: Bot, db: DB, cfg: Config, user: dict, poll_id: int | No
     prev = db.previous_answered_poll(uid, poll_id)
     since = prev["sent_at"] if prev else user["created_at"]
     recorded = len(db.entries_between(uid, from_iso(since), now_utc()))
-    since_txt = fmt_local(since, cfg, True)
+    since_txt = fmt_local(since, utz(user, cfg), True)
     if recorded:
         text = (f"С прошлого опроса ({since_txt}) записано приступов: {recorded}.\n"
                 "<b>Был ли ещё приступ, который не записан?</b>")
@@ -143,7 +150,7 @@ async def on_poll_answer(cb: CallbackQuery, bot: Bot, db: DB, cfg: Config, qn: Q
         remind = now + timedelta(minutes=cfg.snooze_minutes)
         db.update_poll(poll["id"], remind_at=to_iso(remind))
         await cb.message.edit_text(
-            cb.message.html_text + f"\n\n⏰ Хорошо, спрошу ещё раз в {fmt_local(to_iso(remind), cfg)}."
+            cb.message.html_text + f"\n\n⏰ Хорошо, спрошу ещё раз в {fmt_local(to_iso(remind), utz(user, cfg))}."
         )
     elif action == "yes":
         db.update_poll(poll["id"], status="yes", answered_at=to_iso(now), remind_at=None)
@@ -373,18 +380,92 @@ async def on_voice(message: Message, bot: Bot, db: DB, cfg: Config, qn: Question
         await answer_with_text(bot, db, qn, entry, text, message.chat.id)
 
 
+# ---------------------------------------------------------------- часовой пояс
+async def ask_timezone(message: Message) -> None:
+    await message.answer(
+        "🌍 <b>Какой у тебя часовой пояс?</b>\n"
+        "Он нужен, чтобы опросы приходили в правильное время.\n\n"
+        "Проще всего — отправить геопозицию кнопкой ниже: я определю по ней только часовой пояс, "
+        "сами координаты не сохраняются. Или выбери город из списка.",
+        reply_markup=kb.TZ_REQUEST_KB,
+    )
+
+
+async def set_timezone(message: Message, db: DB, cfg: Config, user: dict, tz_name: str) -> None:
+    uid = user["user_id"]
+    db.update_user(uid, tz=tz_name, awaiting=None)
+    fresh = db.get_user(uid)
+    db.update_user(uid, next_poll_at=to_iso(compute_next(fresh, cfg.tz, now_utc())))
+    fresh = db.get_user(uid)
+    tz = utz(fresh, cfg)
+    await message.answer(
+        f"Готово ✅ Часовой пояс: {tz_label(tz)}.\n"
+        f"Сейчас у тебя {now_utc().astimezone(tz):%H:%M}.\n"
+        f"Опрос: {describe_schedule(fresh)}, следующий — {fmt_local(fresh['next_poll_at'], tz, True)}.\n\n"
+        "Поменять можно в «⚙️ Настройки».",
+        reply_markup=kb.MAIN_KB,
+    )
+
+
+@router.message(F.location)
+async def on_location(message: Message, db: DB, cfg: Config, user: dict):
+    loc = message.location
+    try:
+        name = tz_from_location(loc.latitude, loc.longitude)
+    except Exception:  # noqa: BLE001
+        log.exception("Не удалось определить пояс по геопозиции")
+        name = None
+    if not name:
+        return await message.answer("Не получилось определить пояс по геопозиции, выбери город:",
+                                    reply_markup=kb.tz_list_kb())
+    await set_timezone(message, db, cfg, user, name)
+
+
+@router.message(F.text == kb.BTN_TZ_LIST)
+async def on_tz_list(message: Message):
+    await message.answer("Выбери город с тем же временем, что у тебя:", reply_markup=kb.tz_list_kb())
+
+
+@router.message(F.text == kb.BTN_TZ_LATER)
+async def on_tz_later(message: Message, cfg: Config, user: dict):
+    await message.answer(
+        f"Хорошо, пока буду считать время по поясу {tz_label(utz(user, cfg))}. "
+        "Указать свой можно в «⚙️ Настройки» → «🌍 Часовой пояс».",
+        reply_markup=kb.MAIN_KB,
+    )
+
+
+@router.callback_query(F.data.startswith("tz:"))
+async def on_tz_choice(cb: CallbackQuery, db: DB, cfg: Config, user: dict):
+    name = cb.data[3:]
+    await cb.answer()
+    await cb.message.edit_reply_markup(reply_markup=None)
+    if name == "other":
+        db.update_user(user["user_id"], awaiting="tz_time")
+        return await cb.message.answer(
+            "Напиши, сколько у тебя сейчас времени, например <code>14:35</code> — "
+            "я сама вычислю часовой пояс."
+        )
+    await set_timezone(cb.message, db, cfg, user, name)
+
+
 # ---------------------------------------------------------------- команды и меню
 @router.message(CommandStart())
 async def cmd_start(message: Message, cfg: Config, user: dict):
-    await message.answer(
+    text = (
         "Привет! Я веду дневник головной боли 💜\n\n"
         f"• Буду регулярно спрашивать, болела ли голова (сейчас — {describe_schedule(user)}).\n"
         "• Если болит прямо сейчас — нажми «🤕 Записать приступ», не дожидаясь опроса.\n"
         "• На вопросы отвечай кнопками, а в конце можно написать или надиктовать всё, что важно.\n"
         "• «📤 Выгрузка» — файл с дневником за неделю, месяц или всё время, его можно отдать врачу "
         "или нейросети для анализа.\n"
-        "• «⚙️ Настройки» — частота и время опросов.\n\n"
-        f"Следующий опрос: {fmt_local(user['next_poll_at'], cfg, True)}.",
+        "• «⚙️ Настройки» — частота и время опросов, часовой пояс."
+    )
+    if not user.get("tz"):
+        await message.answer(text)
+        return await ask_timezone(message)
+    await message.answer(
+        text + f"\n\nСледующий опрос: {fmt_local(user['next_poll_at'], utz(user, cfg), True)}.",
         reply_markup=kb.MAIN_KB,
     )
 
@@ -411,7 +492,7 @@ async def on_export(cb: CallbackQuery, db: DB, cfg: Config, qn: Questionnaire, u
     kind, period = cb.data.split(":")
     await cb.answer("Готовлю файл…")
     builder = build_csv if kind == "ec" else build_markdown
-    filename, data = builder(db, qn, user["user_id"], period, cfg.tz)
+    filename, data = builder(db, qn, user["user_id"], period, utz(user, cfg))
     caption = ("Таблица для Excel / Google Sheets." if kind == "ec" else
                "Дневник готов. Можно отправить этот файл нейросети с просьбой: "
                "«Проанализируй дневник головной боли: частота, сила, возможные триггеры, "
@@ -440,7 +521,12 @@ async def answer_with_text(bot: Bot, db: DB, qn: Questionnaire, entry: dict, tex
 
 
 @router.message(F.text & ~F.text.startswith("/"))
-async def on_text(message: Message, bot: Bot, db: DB, qn: Questionnaire, user: dict):
+async def on_text(message: Message, bot: Bot, db: DB, cfg: Config, qn: Questionnaire, user: dict):
+    if user.get("awaiting") == "tz_time":
+        name = tz_from_local_time(message.text, now_utc())
+        if name:
+            return await set_timezone(message, db, cfg, user, name)
+        return await message.answer("Не поняла время 🤔 Напиши в формате <code>14:35</code>.")
     entry = db.open_entry(user["user_id"])
     if not entry:
         return await message.answer(
@@ -460,15 +546,14 @@ def describe_schedule(user: dict) -> str:
 
 
 def settings_text(user: dict, cfg: Config) -> str:
-    tz_name = getattr(cfg.tz, "key", None) or str(cfg.tz)
-    offset = now_utc().astimezone(cfg.tz).strftime("%z")
-    tz_name = f"{tz_name} (UTC{offset[:3]}:{offset[3:]})"
-    status = "⏸ на паузе" if user["paused"] else f"следующий — {fmt_local(user['next_poll_at'], cfg, True)}"
+    tz = utz(user, cfg)
+    status = "⏸ на паузе" if user["paused"] else f"следующий — {fmt_local(user['next_poll_at'], tz, True)}"
+    tz_text = tz_label(tz) + ("" if user.get("tz") else " — по умолчанию, лучше указать свой")
     return (
         "<b>⚙️ Настройки</b>\n\n"
         f"Опрос: {describe_schedule(user)}\n"
         f"Статус: {status}\n"
-        f"Часовой пояс: {tz_name}"
+        f"Часовой пояс: {tz_text}"
     )
 
 
@@ -490,6 +575,8 @@ async def on_settings_cb(cb: CallbackQuery, bot: Bot, db: DB, cfg: Config, qn: Q
         db.update_user(uid, next_poll_at=to_iso(compute_next(fresh, cfg.tz, now_utc())))
         return db.get_user(uid)
 
+    if action == "tz":
+        return await ask_timezone(cb.message)
     if action == "freq":
         return await cb.message.edit_text("Как часто спрашивать?", reply_markup=kb.freq_kb())
     if action == "time":
