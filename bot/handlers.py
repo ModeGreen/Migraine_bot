@@ -240,9 +240,8 @@ def main_screen(db: DB, cfg: Config, user: dict, note: str = "") -> Screen:
     return "\n".join(lines), kb.main_kb(bool(open_entry), not user.get("tz"))
 
 
-def help_screen(user: dict) -> Screen:
+def help_text(user: dict) -> str:
     return (
-        "❓ <b>Как пользоваться</b>\n\n"
         f"• Я регулярно спрашиваю, болела ли голова (сейчас — {describe_schedule(user)}).\n"
         "• Если болит прямо сейчас — «🤕 Записать приступ», не дожидаясь опроса.\n"
         "• На вопросы отвечай кнопками или просто напиши ответ. В конце можно написать "
@@ -250,9 +249,12 @@ def help_screen(user: dict) -> Screen:
         "• Твои сообщения я сохраняю в дневник и убираю из чата, чтобы не копился мусор.\n"
         "• «📤 Выгрузка» — файл с дневником, его можно отдать врачу или нейросети.\n"
         "• «⚙️ Настройки» — частота и время опросов, часовой пояс, пауза.\n"
-        "• Кнопка «⬅️ Назад» возвращает на шаг назад, «🏠 Меню» — в главное меню.",
-        kb.help_kb(),
+        "• Кнопка «⬅️ Назад» возвращает на шаг назад, «🏠 Меню» — в главное меню."
     )
+
+
+def help_screen(user: dict) -> Screen:
+    return "❓ <b>Как пользоваться</b>\n\n" + help_text(user), kb.help_kb()
 
 
 def export_screen() -> Screen:
@@ -277,7 +279,8 @@ def settings_screen(cfg: Config, user: dict, note: str = "") -> Screen:
 def tz_screen(user: dict, welcome: bool = False) -> Screen:
     text = ""
     if welcome:
-        text = ("Привет! Я веду дневник головной боли 💜\n"
+        text = ("Привет! Я веду дневник головной боли 💜\n\n"
+                f"{help_text(user)}\n\n"
                 "Для начала — один вопрос, чтобы опросы приходили в правильное время.\n\n")
     text += ("🌍 <b>Какой у тебя часовой пояс?</b>\n\n"
              "Выбери город с тем же временем, что у тебя.\n"
@@ -401,9 +404,15 @@ async def cmd_start(message: Message, bot: Bot, db: DB, cfg: Config, user: dict)
     await show(bot, db, user["user_id"], main_screen(db, cfg, user), new=True)
 
 
-@router.message(Command("menu", "help"))
+@router.message(Command("menu"))
 async def cmd_menu(message: Message, bot: Bot, db: DB, cfg: Config, user: dict):
     await open_main(message, bot, db, cfg, user)
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message, bot: Bot, db: DB, user: dict):
+    await delete_incoming(message)
+    await show(bot, db, user["user_id"], help_screen(user), new=True)
 
 
 @router.message(Command("settings"))

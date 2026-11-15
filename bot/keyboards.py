@@ -49,7 +49,6 @@ def main_kb(has_open_entry: bool, need_tz: bool) -> InlineKeyboardMarkup:
     rows.append([IB(text="🤕 Записать приступ", callback_data="rec")])
     rows.append([IB(text="📤 Выгрузка", callback_data="go:export"),
                  IB(text="⚙️ Настройки", callback_data="go:settings")])
-    rows.append([IB(text="❓ Как пользоваться", callback_data="go:help")])
     return _kb(rows)
 
 
