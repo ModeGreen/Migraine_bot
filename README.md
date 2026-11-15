@@ -92,6 +92,25 @@ docker compose restart
 
 У каждого пользователя из `ALLOWED_USER_IDS` свой отдельный дневник, свой часовой пояс и свои настройки опросов.
 
+## Ручная установка модели Whisper
+
+Бот сам скачивает модель с huggingface.co при первом запуске (в логах: `Скачиваю модель Whisper…` → `Модель Whisper готова`). Если сеть сервера не пускает к huggingface.co или качает очень медленно, скачайте 4 файла на любом компьютере, где сайт открывается:
+
+```
+https://huggingface.co/Systran/faster-whisper-medium/resolve/main/config.json
+https://huggingface.co/Systran/faster-whisper-medium/resolve/main/model.bin
+https://huggingface.co/Systran/faster-whisper-medium/resolve/main/tokenizer.json
+https://huggingface.co/Systran/faster-whisper-medium/resolve/main/vocabulary.txt
+```
+
+(для другой модели замените `medium` на `small` и т. п.) и положите их на сервер в `data/models/faster-whisper-medium/`, например:
+
+```bash
+scp config.json model.bin tokenizer.json vocabulary.txt user@server:Migraine_bot/data/models/faster-whisper-medium/
+```
+
+Бот подхватит модель сам, перезапуск не нужен. Голосовые, присланные до этого, расшифруются автоматически.
+
 ## Обслуживание
 
 ```bash

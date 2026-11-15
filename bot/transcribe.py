@@ -1,8 +1,10 @@
 """Расшифровка голосовых через faster-whisper.
 
-Модель загружается только при первом голосовом и выгружается после
-WHISPER_UNLOAD_MINUTES минут простоя, так что в остальное время
-память не занята.
+- Модель скачивается один раз в data/models/faster-whisper-<имя> фоном при старте бота,
+  а не при первом голосовом. Пока она не готова, голосовые сохраняются и
+  расшифровываются позже. Модель можно положить в эту папку и вручную (см. README).
+- В память модель загружается только при расшифровке и выгружается после
+  WHISPER_UNLOAD_MINUTES минут простоя.
 """
 from __future__ import annotations
 
@@ -13,6 +15,9 @@ import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+MODEL_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt")
+DOWNLOAD_RETRY_SECONDS = 600
 
 
 class Transcriber:
@@ -29,30 +34,64 @@ class Transcriber:
     def enabled(self) -> bool:
         return self.model_name.lower() not in ("", "off", "none", "false", "0")
 
-    def _load(self):
-        from faster_whisper import WhisperModel
+    @property
+    def model_dir(self) -> Path:
+        custom = Path(self.model_name)
+        if custom.is_absolute():
+            return custom  # WHISPER_MODEL=/путь/к/папке/с/моделью
+        return self.models_dir / f"faster-whisper-{self.model_name}"
 
-        log.info("Загружаю модель Whisper %s…", self.model_name)
-        started = time.monotonic()
-        model = WhisperModel(
-            self.model_name,
-            device="cpu",
-            compute_type="int8",
-            download_root=str(self.models_dir),
-        )
-        log.info("Модель загружена за %.1f с", time.monotonic() - started)
-        return model
+    @property
+    def ready(self) -> bool:
+        """Все файлы модели на диске. huggingface_hub качает во временный *.incomplete
+        и кладёт файл на место только целиком, так что недокачанный model.bin здесь не появится."""
+        return all((self.model_dir / f).is_file() for f in MODEL_FILES)
 
+    # ---------- скачивание ----------
+    def _download(self) -> None:
+        from faster_whisper import download_model
+
+        download_model(self.model_name, output_dir=str(self.model_dir))
+
+    async def download_forever(self) -> None:
+        """Фоновая задача: докачивает модель, при ошибке пробует снова через 10 минут."""
+        if not self.enabled:
+            return
+        while not self.ready:
+            if Path(self.model_name).is_absolute():
+                log.error("Модель не найдена в %s — нужны файлы %s", self.model_dir, ", ".join(MODEL_FILES))
+                return
+            log.info("Скачиваю модель Whisper %s в %s (один раз)…", self.model_name, self.model_dir)
+            started = time.monotonic()
+            try:
+                await asyncio.to_thread(self._download)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Не удалось скачать модель (%s). Повтор через %d мин. "
+                            "Если сеть не пускает к huggingface.co — положите модель вручную, см. README.",
+                            exc, DOWNLOAD_RETRY_SECONDS // 60)
+                await asyncio.sleep(DOWNLOAD_RETRY_SECONDS)
+                continue
+            log.info("Модель скачана за %.0f с", time.monotonic() - started)
+        log.info("Модель Whisper готова: %s", self.model_dir)
+
+    # ---------- расшифровка ----------
     def _run(self, path: Path) -> str:
         if self._model is None:
-            self._model = self._load()
+            from faster_whisper import WhisperModel
+
+            log.info("Загружаю модель Whisper в память…")
+            started = time.monotonic()
+            self._model = WhisperModel(str(self.model_dir), device="cpu", compute_type="int8")
+            log.info("Модель загружена за %.1f с", time.monotonic() - started)
         segments, _info = self._model.transcribe(
             str(path), language=self.language, beam_size=5, vad_filter=True
         )
         return " ".join(s.text.strip() for s in segments).strip()
 
     async def transcribe(self, path: Path) -> str:
-        """Расшифровывает файл. Голосовые обрабатываются по одному."""
+        """Расшифровывает файл. Голосовые обрабатываются по одному. Требует ready=True."""
+        if not self.ready:
+            raise RuntimeError("Модель Whisper ещё не скачана")
         async with self._lock:
             started = time.monotonic()
             text = await asyncio.to_thread(self._run, path)

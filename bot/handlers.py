@@ -393,6 +393,37 @@ async def transcribe_note(transcriber: Transcriber, db: DB, note_id: int, path: 
     return text
 
 
+_queue_running = False
+
+
+async def process_queued_voice(bot: Bot, db: DB, transcriber: Transcriber) -> None:
+    """Расшифровывает голосовые, отложенные до готовности модели, и присылает текст."""
+    global _queue_running
+    if _queue_running or not transcriber.ready:
+        return
+    _queue_running = True
+    try:
+        for note in db.queued_voice_notes():
+            path = Path(note["file_path"] or "")
+            if not path.is_file():
+                db.update_note(note["id"], status="failed")
+                continue
+            text = await transcribe_note(transcriber, db, note["id"], path)
+            entry = db.get_entry(note["entry_id"])
+            user = db.get_user(entry["user_id"]) if entry else None
+            if not user:
+                continue
+            body = (f"🎙 Расшифровала голосовое: «{escape(text) or '…'}»" if text is not None
+                    else "⚠️ Не получилось расшифровать голосовое, но оно сохранено.")
+            try:
+                await bot.edit_message_text(text=body, chat_id=user["chat_id"],
+                                            message_id=note["status_msg_id"])
+            except Exception:  # noqa: BLE001 — сообщение удалено/старое: шлём новое
+                await bot.send_message(user["chat_id"], body)
+    finally:
+        _queue_running = False
+
+
 @router.message(F.voice | F.audio | F.video_note)
 async def on_voice(message: Message, bot: Bot, db: DB, cfg: Config, qn: Questionnaire,
                    transcriber: Transcriber, user: dict):
@@ -410,6 +441,17 @@ async def on_voice(message: Message, bot: Bot, db: DB, cfg: Config, qn: Question
             return await message.answer("Голосовое сохранено в заметки, но расшифровка отключена — "
                                         "на вопрос ответь кнопкой или текстом.")
         return await react(message)
+
+    if not transcriber.ready:
+        # Модель ещё скачивается — не держим чат, расшифруем позже (process_queued_voice)
+        note_id = db.add_note(entry["id"], "voice", file_path=str(path), status="queued")
+        hint = "\nНа вопрос пока ответь кнопкой или текстом." if entry["stage"] == "questions" else ""
+        status = await message.reply(
+            "🎙 Голосовое сохранено. Модель для расшифровки ещё готовится — "
+            f"пришлю текст сюда, как только она будет готова.{hint}"
+        )
+        db.update_note(note_id, status_msg_id=status.message_id)
+        return
 
     note_id = db.add_note(entry["id"], "voice", file_path=str(path), status="pending")
     status = await message.reply("🎙 Расшифровываю…")

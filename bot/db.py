@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS notes (
     kind       TEXT    NOT NULL,           -- text | voice
     text       TEXT,
     file_path  TEXT,
-    status     TEXT    NOT NULL DEFAULT 'ok'  -- ok | pending | failed
+    status     TEXT    NOT NULL DEFAULT 'ok', -- ok | pending (расшифровывается) | queued (ждёт модель) | failed
+    status_msg_id INTEGER                   -- сообщение «🎙 …», которое обновится расшифровкой
 );
 
 CREATE INDEX IF NOT EXISTS idx_polls_user   ON polls(user_id, sent_at);
@@ -90,6 +91,7 @@ class DB:
         wanted = {
             "users": {"tz": "TEXT", "awaiting": "TEXT"},
             "entries": {"q_message_id": "INTEGER"},
+            "notes": {"status_msg_id": "INTEGER"},
         }
         for table, cols in wanted.items():
             have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
@@ -264,5 +266,9 @@ class DB:
     def notes_for(self, entry_id: int) -> list[dict]:
         return self._all("SELECT * FROM notes WHERE entry_id=? ORDER BY id", (entry_id,))
 
-    def pending_voice_notes(self) -> list[dict]:
-        return self._all("SELECT * FROM notes WHERE kind='voice' AND status='pending'")
+    def requeue_interrupted_voice(self) -> None:
+        """Голосовые, расшифровка которых оборвалась перезапуском, — снова в очередь."""
+        self._exec("UPDATE notes SET status='queued' WHERE kind='voice' AND status='pending'")
+
+    def queued_voice_notes(self) -> list[dict]:
+        return self._all("SELECT * FROM notes WHERE kind='voice' AND status='queued' ORDER BY id")

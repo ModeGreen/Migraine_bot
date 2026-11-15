@@ -115,6 +115,7 @@ def _entry_block(qn: Questionnaire, e: dict, tz: ZoneInfo) -> list[str]:
             if n["kind"] == "voice":
                 body = n["text"] or {
                     "pending": "(голосовое ещё расшифровывается)",
+                    "queued": "(голосовое ещё не расшифровано)",
                     "failed": "(голосовое не удалось расшифровать)",
                 }.get(n["status"], "(голосовое без расшифровки)")
                 lines.append(f"  - {nt:%H:%M} (голосом): {body}")

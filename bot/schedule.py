@@ -29,9 +29,10 @@ def compute_next(user: dict, tz: ZoneInfo, after: datetime, extra_days: int = 0)
 async def run_background(bot, db, cfg, qn, transcriber) -> None:
     # импорт здесь, чтобы избежать циклического импорта
     from .db import from_iso, now_utc, to_iso
-    from .handlers import finish_entry, send_poll
+    from .handlers import finish_entry, process_queued_voice, send_poll
 
     last_backup_day = None
+    voice_task: asyncio.Task | None = None
     while True:
         try:
             now = now_utc()
@@ -83,7 +84,9 @@ async def run_background(bot, db, cfg, qn, transcriber) -> None:
                     log.exception("Не удалось закрыть запись %s", entry["id"])
                     db.close_entry(entry["id"])
 
-            # 4. Выгрузка Whisper из памяти
+            # 4. Отложенные голосовые (ждали скачивания модели) и выгрузка Whisper из памяти
+            if transcriber.ready and (voice_task is None or voice_task.done()) and db.queued_voice_notes():
+                voice_task = asyncio.create_task(process_queued_voice(bot, db, transcriber))
             await transcriber.unload_if_idle()
         except Exception:  # noqa: BLE001
             log.exception("Ошибка в фоновом цикле")
