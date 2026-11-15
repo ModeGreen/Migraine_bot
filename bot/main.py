@@ -37,6 +37,7 @@ async def main() -> None:
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     handlers.images = MenuImages(cfg.menu_dir, db)
+    handlers.kb.set_icons_enabled(cfg.custom_emoji)
     log.info("Картинки меню: %s", cfg.menu_dir if cfg.menu_dir.is_dir() else "нет папки — меню будет текстом")
     dp = Dispatcher(db=db, cfg=cfg, qn=qn, transcriber=transcriber)
     dp.message.outer_middleware(AccessMiddleware())

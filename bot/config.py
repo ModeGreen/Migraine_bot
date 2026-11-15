@@ -40,6 +40,11 @@ class Config:
     snooze_minutes: int
 
     @property
+    def custom_emoji(self) -> bool:
+        """Иконки кнопок из пака кастомных эмодзи (нужен Telegram Premium у владельца бота)."""
+        return os.environ.get("CUSTOM_EMOJI", "1").strip().lower() not in ("0", "false", "no", "off", "")
+
+    @property
     def menu_dir(self) -> Path:
         return Path(os.environ.get("MENU_DIR", "menu")).resolve()
 

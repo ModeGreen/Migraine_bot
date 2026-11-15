@@ -198,8 +198,28 @@ def _fit_caption(text: str) -> tuple[str, str | None]:
     return plain[: CAPTION_LIMIT - 1] + "…", None
 
 
+def _icon_error(exc: TelegramBadRequest) -> bool:
+    msg = str(exc).lower()
+    return any(word in msg for word in ("emoji", "icon", "premium"))
+
+
 async def show(bot: Bot, db: DB, uid: int, screen: Screen, *, new: bool = False,
                via: int | None = None) -> None:
+    """Показывает экран; если Telegram не принял иконки-эмодзи на кнопках
+    (нет Premium у владельца бота), переключается на обычные эмодзи и повторяет."""
+    try:
+        await _show(bot, db, uid, screen, new=new, via=via)
+    except TelegramBadRequest as exc:
+        if not (kb.icons_enabled() and _icon_error(exc)):
+            raise
+        log.warning("Telegram не принял кастомные эмодзи на кнопках (%s) — включаю обычные", exc)
+        kb.set_icons_enabled(False)
+        text, markup, img = screen
+        await _show(bot, db, uid, (text, kb.strip_icons(markup), img), new=new, via=via)
+
+
+async def _show(bot: Bot, db: DB, uid: int, screen: Screen, *, new: bool = False,
+                via: int | None = None) -> None:
     """Показывает экран в панели.
 
     Панель — сообщение с картинкой раздела (или просто текст, если картинки нет).
@@ -241,6 +261,8 @@ async def show(bot: Bot, db: DB, uid: int, screen: Screen, *, new: bool = False,
                     images.remember(img, msg.photo[-1].file_id)
             edited = True
         except TelegramBadRequest as exc:
+            if kb.icons_enabled() and _icon_error(exc):
+                raise
             edited = "not modified" in str(exc)
         if edited:
             if panel and panel != target:
