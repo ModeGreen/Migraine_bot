@@ -13,6 +13,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
+    ErrorEvent,
     Message,
     ReactionTypeEmoji,
     TelegramObject,
@@ -25,7 +26,7 @@ from .export import build_csv, build_markdown
 from .questions import Question, Questionnaire
 from .schedule import compute_next
 from .transcribe import Transcriber
-from .tz import tz_from_local_time, tz_from_location, tz_label, user_tz
+from .tz import TZ_CHOICES, tz_from_local_time, tz_from_location, tz_label, user_tz
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -33,7 +34,11 @@ router = Router()
 
 # ---------------------------------------------------------------- доступ
 class AccessMiddleware(BaseMiddleware):
-    """Пускает только пользователей из ALLOWED_USER_IDS и регистрирует их в базе."""
+    """Пускает только пользователей из ALLOWED_USER_IDS и только в личном чате,
+    регистрирует их в базе."""
+
+    def __init__(self) -> None:
+        self._denied: dict[int, Any] = {}
 
     async def __call__(
         self,
@@ -42,24 +47,32 @@ class AccessMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         user = data.get("event_from_user")
+        chat = data.get("event_chat")
         cfg: Config = data["cfg"]
         if user is None:
             return None
+        # Только личные сообщения: в группе дневник (медицинские данные) увидели бы другие люди
+        if chat is None or chat.type != "private" or chat.id != user.id:
+            if isinstance(event, CallbackQuery):
+                await event.answer()
+            return None
         if user.id not in cfg.allowed_user_ids:
-            log.warning("Отказ в доступе: %s (@%s)", user.id, user.username)
-            text = (
-                "Это личный бот, у тебя нет доступа.\n"
-                f"Твой Telegram ID: <code>{user.id}</code>\n"
-                "Если это твой бот — добавь ID в ALLOWED_USER_IDS в файле .env и перезапусти его."
-            )
-            if isinstance(event, Message):
-                await event.answer(text)
-            elif isinstance(event, CallbackQuery):
+            log.warning("Отказ в доступе: %s", user.id)
+            # Отвечаем не чаще раза в час, чтобы бот нельзя было заставить спамить
+            now = now_utc()
+            last = self._denied.get(user.id)
+            if isinstance(event, CallbackQuery):
                 await event.answer("Нет доступа", show_alert=True)
+            elif last is None or now - last > timedelta(hours=1):
+                self._denied[user.id] = now
+                await event.answer(
+                    "Это личный бот, у тебя нет доступа.\n"
+                    f"Твой Telegram ID: <code>{user.id}</code>\n"
+                    "Если это твой бот — добавь ID в ALLOWED_USER_IDS в файле .env и перезапусти его."
+                )
             return None
         db: DB = data["db"]
-        chat = data.get("event_chat")
-        row, created = db.ensure_user(user.id, chat.id if chat else user.id)
+        row, created = db.ensure_user(user.id, chat.id)
         if created or row["next_poll_at"] is None:
             db.update_user(user.id, next_poll_at=to_iso(compute_next(row, cfg.tz, now_utc())))
             row = db.get_user(user.id)
@@ -67,7 +80,27 @@ class AccessMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+@router.error()
+async def on_error(event: ErrorEvent) -> bool:
+    """Ошибка в одном обработчике (например, подделанные данные кнопки) не должна ронять бота."""
+    log.error("Ошибка при обработке обновления: %r", event.exception, exc_info=event.exception)
+    cq = event.update.callback_query
+    if cq:
+        try:
+            await cq.answer("Что-то пошло не так 😔")
+        except TelegramBadRequest:
+            pass
+    return True
+
+
 # ---------------------------------------------------------------- вспомогательное
+def is_valid_time(value: str) -> bool:
+    """Строго «ЧЧ:ММ» в пределах суток."""
+    if len(value) != 5 or value[2] != ":" or not (value[:2] + value[3:]).isdigit():
+        return False
+    return int(value[:2]) < 24 and int(value[3:]) < 60
+
+
 def utz(user: dict | None, cfg: Config) -> tzinfo:
     """Часовой пояс пользователя (или пояс по умолчанию, пока он не указан)."""
     return user_tz(user, cfg.tz)
@@ -213,11 +246,18 @@ async def finish_entry(bot: Bot, db: DB, qn: Questionnaire, cfg: Config, chat_id
 
 def _question_for(cb: CallbackQuery, db: DB, qn: Questionnaire, user: dict) -> tuple[dict, int, Question] | None:
     parts = cb.data.split(":")
-    entry = db.get_entry(int(parts[1]))
-    step = int(parts[2])
-    if not entry or entry["user_id"] != user["user_id"] or step >= len(qn):
+    try:
+        entry = db.get_entry(int(parts[1]))
+        step = int(parts[2])
+        opt = int(parts[3]) if len(parts) > 3 else None
+    except (IndexError, ValueError):
         return None
-    return entry, step, qn.questions[step]
+    if not entry or entry["user_id"] != user["user_id"] or not 0 <= step < len(qn):
+        return None
+    q = qn.questions[step]
+    if opt is not None and not 0 <= opt < len(q.options):
+        return None
+    return entry, step, q
 
 
 async def _answered(bot: Bot, db: DB, qn: Questionnaire, cb_or_chat, entry: dict, step: int,
@@ -438,6 +478,8 @@ async def on_tz_later(message: Message, cfg: Config, user: dict):
 @router.callback_query(F.data.startswith("tz:"))
 async def on_tz_choice(cb: CallbackQuery, db: DB, cfg: Config, user: dict):
     name = cb.data[3:]
+    if name != "other" and name not in {n for _, n in TZ_CHOICES}:
+        return await cb.answer("Неизвестный пояс")
     await cb.answer()
     await cb.message.edit_reply_markup(reply_markup=None)
     if name == "other":
@@ -582,9 +624,14 @@ async def on_settings_cb(cb: CallbackQuery, bot: Bot, db: DB, cfg: Config, qn: Q
     if action == "time":
         return await cb.message.edit_text("Во сколько спрашивать?", reply_markup=kb.time_kb())
     if action == "int":
+        # Принимаем только значения с кнопок — данные callback'а может подделать клиент
+        if len(parts) != 3 or not parts[2].isdigit() or int(parts[2]) not in kb.FREQ_OPTIONS:
+            return
         db.update_user(uid, interval_days=int(parts[2]))
         user = reschedule()
     elif action == "t":
+        if len(parts) != 4 or not is_valid_time(f"{parts[2]}:{parts[3]}"):
+            return
         db.update_user(uid, poll_time=f"{parts[2]}:{parts[3]}")
         user = reschedule()
     elif action == "pause":

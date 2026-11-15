@@ -207,6 +207,12 @@ def build_markdown(db: DB, qn: Questionnaire, user_id: int, period: str, tz: Zon
     return filename, "\n".join(lines).encode("utf-8")
 
 
+def _csv_safe(value) -> str:
+    """Защита от CSV-инъекций: Excel выполняет ячейки, начинающиеся с = + @, как формулы."""
+    text = str(value)
+    return "'" + text if text[:1] in ("=", "+", "@", "\t", "\r") else text
+
+
 def build_csv(db: DB, qn: Questionnaire, user_id: int, period: str, tz: ZoneInfo) -> tuple[str, bytes]:
     _start, end, _title, entries, polls = _collect(db, user_id, period)
     buf = io.StringIO()
@@ -225,7 +231,7 @@ def build_csv(db: DB, qn: Questionnaire, user_id: int, period: str, tz: ZoneInfo
         status = {"no": "не болела", "missed": "без ответа", "pending": "ждёт ответа"}[p["status"]]
         rows.append((t, [f"{t:%Y-%m-%d}", f"{t:%H:%M}", "опрос", status, *[""] * len(qn.questions), ""]))
     for _, row in sorted(rows, key=lambda r: r[0]):
-        w.writerow(row)
+        w.writerow([_csv_safe(c) for c in row])
     filename = f"migraine_diary_{period}_{end.astimezone(tz):%Y-%m-%d}.csv"
     # BOM, чтобы Excel правильно открыл кириллицу
     return filename, ("﻿" + buf.getvalue()).encode("utf-8")

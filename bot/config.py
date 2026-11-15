@@ -72,4 +72,10 @@ def load_config() -> Config:
     )
     cfg.voice_dir.mkdir(exist_ok=True)
     cfg.models_dir.mkdir(exist_ok=True)
+    # Медицинские данные — доступ только владельцу
+    for path in (cfg.data_dir, cfg.voice_dir):
+        try:
+            path.chmod(0o700)
+        except OSError:
+            pass
     return cfg

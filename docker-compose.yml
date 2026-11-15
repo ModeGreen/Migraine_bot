@@ -4,10 +4,17 @@ services:
     container_name: migraine-bot
     restart: unless-stopped
     env_file: .env
+    # Бот работает от имени вашего пользователя (узнать: id -u / id -g),
+    # чтобы файлы в ./data принадлежали вам, а не root
+    user: "${PUID:-1000}:${PGID:-1000}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       - ./data:/app/data                        # база, голосовые, бэкапы, модель Whisper
       - ./questions.yaml:/app/questions.yaml:ro # вопросы можно править без пересборки
-      - /etc/localtime:/etc/localtime:ro        # часовой пояс берётся у сервера
+      - /etc/localtime:/etc/localtime:ro        # пояс по умолчанию — как у сервера
     logging:
       driver: json-file
       options:

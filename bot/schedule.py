@@ -35,27 +35,34 @@ async def run_background(bot, db, cfg, qn, transcriber) -> None:
     while True:
         try:
             now = now_utc()
-            # 0. Ежедневный бэкап базы
+            # 0. Ежедневный бэкап базы (ошибка бэкапа не должна останавливать опросы)
             if now.date() != last_backup_day:
-                path = db.backup(cfg.data_dir / "backups")
                 last_backup_day = now.date()
-                log.info("Бэкап базы: %s", path)
+                try:
+                    log.info("Бэкап базы: %s", db.backup(cfg.data_dir / "backups"))
+                except Exception:  # noqa: BLE001
+                    log.exception("Не удалось сделать бэкап базы")
 
-            # 1. Регулярные опросы
+            # 1. Регулярные опросы — только тем, кто сейчас в белом списке
             for user in db.all_users():
+                if user["user_id"] not in cfg.allowed_user_ids:
+                    continue
                 if user["paused"] or not user["next_poll_at"]:
                     continue
-                if now >= from_iso(user["next_poll_at"]):
-                    nxt = compute_next(user, cfg.tz, now, extra_days=user["interval_days"] - 1)
-                    db.update_user(user["user_id"], next_poll_at=to_iso(nxt))
-                    try:
+                try:
+                    if now >= from_iso(user["next_poll_at"]):
+                        nxt = compute_next(user, cfg.tz, now, extra_days=max(0, user["interval_days"] - 1))
+                        db.update_user(user["user_id"], next_poll_at=to_iso(nxt))
                         await send_poll(bot, db, cfg, user)
-                    except Exception:  # noqa: BLE001
-                        log.exception("Не удалось отправить опрос пользователю %s", user["user_id"])
+                except Exception:  # noqa: BLE001
+                    log.exception("Не удалось отправить опрос пользователю %s", user["user_id"])
 
             # 2. «Спроси позже»
             for poll in db.due_reminders(now):
                 user = db.get_user(poll["user_id"])
+                if not user or user["user_id"] not in cfg.allowed_user_ids:
+                    db.update_poll(poll["id"], remind_at=None)
+                    continue
                 try:
                     await send_poll(bot, db, cfg, user, poll_id=poll["id"])
                 except Exception:  # noqa: BLE001
@@ -67,6 +74,9 @@ async def run_background(bot, db, cfg, qn, transcriber) -> None:
             stale += db.stale_entries("questions", now - QUESTIONS_AUTOCLOSE)
             for entry in stale:
                 user = db.get_user(entry["user_id"])
+                if not user or user["user_id"] not in cfg.allowed_user_ids:
+                    db.close_entry(entry["id"])
+                    continue
                 try:
                     await finish_entry(bot, db, qn, cfg, user["chat_id"], entry["id"], auto=True)
                 except Exception:  # noqa: BLE001
