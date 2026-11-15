@@ -1,65 +1,29 @@
+"""Inline-клавиатуры. Весь интерфейс — одно сообщение-«панель», которое меняется
+при навигации; reply-клавиатур нет, чтобы в чате не копились сообщения."""
 from __future__ import annotations
 
-from aiogram.types import (
-    InlineKeyboardButton as IB,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-)
+from aiogram.types import InlineKeyboardButton as IB, InlineKeyboardMarkup
 
 from .questions import Question
 
+BACK = "⬅️ Назад"
+HOME = "🏠 Меню"
+FREQ_OPTIONS = {1: "Каждый день", 2: "Через день", 3: "Раз в 3 дня", 7: "Раз в неделю"}
+
+
 def _norm(text: str | None) -> str:
-    """Убирает невидимые селекторы вариантов эмодзи (U+FE0E/U+FE0F) и лишние пробелы:
-    разные клиенты Telegram присылают текст кнопки «⚙️ Настройки» по-разному."""
+    """Убирает селекторы вариантов эмодзи (U+FE0E/U+FE0F) и лишние пробелы."""
     return " ".join((text or "").replace("️", "").replace("︎", "").split())
 
 
-def is_btn(button: str):
-    """Фильтр aiogram: сообщение — нажатие на кнопку reply-клавиатуры `button`."""
-    from aiogram import F
-
-    target = _norm(button)
-    return F.text.func(lambda t: _norm(t) == target)
-
-
-BTN_RECORD = "🤕 Записать приступ"
-BTN_EXPORT = "📤 Выгрузка"
-BTN_SETTINGS = "⚙️ Настройки"
-BTN_DONE = "✅ Готово"
-
-MAIN_KB = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=BTN_RECORD)],
-              [KeyboardButton(text=BTN_EXPORT), KeyboardButton(text=BTN_SETTINGS)]],
-    resize_keyboard=True,
-    is_persistent=True,
-)
-
-NOTES_KB = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=BTN_DONE)]],
-    resize_keyboard=True,
-    is_persistent=True,
-)
-
-
-BTN_TZ_LIST = "🌐 Выбрать город из списка"
-BTN_TZ_LATER = "⏭ Позже"
-
-TZ_REQUEST_KB = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="📍 Отправить геопозицию", request_location=True)],
-              [KeyboardButton(text=BTN_TZ_LIST)],
-              [KeyboardButton(text=BTN_TZ_LATER)]],
-    resize_keyboard=True,
-    one_time_keyboard=True,
-)
-
-
-def tz_list_kb() -> "InlineKeyboardMarkup":
-    from .tz import TZ_CHOICES
-
-    rows = _rows([IB(text=label, callback_data=f"tz:{name}") for label, name in TZ_CHOICES], 2)
-    rows.append([IB(text="🕐 Другой — укажу, сколько у меня времени", callback_data="tz:other")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+# Кнопки старой reply-клавиатуры: у пользователей прошлой версии они могут
+# остаться на экране, пока бот её не уберёт, — понимаем их нажатия.
+LEGACY_BUTTONS = {
+    _norm("🤕 Записать приступ"): "rec",
+    _norm("📤 Выгрузка"): "export",
+    _norm("⚙️ Настройки"): "settings",
+    _norm("✅ Готово"): "done",
+}
 
 
 def _rows(buttons: list[IB], columns: int) -> list[list[IB]]:
@@ -67,15 +31,52 @@ def _rows(buttons: list[IB], columns: int) -> list[list[IB]]:
     return [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
 
 
+def _kb(rows: list[list[IB]]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def back(to: str = "main", text: str = BACK) -> IB:
+    return IB(text=text, callback_data=f"go:{to}")
+
+
+# ---------------------------------------------------------------- главное меню
+def main_kb(has_open_entry: bool, need_tz: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if need_tz:
+        rows.append([IB(text="🌍 Указать часовой пояс", callback_data="go:tz")])
+    if has_open_entry:
+        rows.append([IB(text="▶️ Продолжить запись", callback_data="go:entry")])
+    rows.append([IB(text="🤕 Записать приступ", callback_data="rec")])
+    rows.append([IB(text="📤 Выгрузка", callback_data="go:export"),
+                 IB(text="⚙️ Настройки", callback_data="go:settings")])
+    rows.append([IB(text="❓ Как пользоваться", callback_data="go:help")])
+    return _kb(rows)
+
+
+def help_kb() -> InlineKeyboardMarkup:
+    return _kb([[back()]])
+
+
+# ---------------------------------------------------------------- опрос
 def poll_kb(poll_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+    return _kb([
         [IB(text="Нет 🙂", callback_data=f"p:{poll_id}:no"),
          IB(text="Да 🤕", callback_data=f"p:{poll_id}:yes")],
-        [IB(text="⏰ Спроси позже", callback_data=f"p:{poll_id}:later")],
+        [IB(text="⏰ Спроси позже", callback_data=f"p:{poll_id}:later"), back(text=HOME)],
     ])
 
 
-def question_kb(entry_id: int, step: int, q: Question, selected: list | None = None) -> InlineKeyboardMarkup:
+# ---------------------------------------------------------------- запись приступа
+def _entry_nav(entry_id: int) -> list[IB]:
+    return [IB(text=BACK, callback_data=f"qb:{entry_id}"), back(text=HOME),
+            IB(text="✖️ Отменить", callback_data=f"x:{entry_id}")]
+
+
+def question_kb(entry_id: int, step: int, q: Question, selected: list | None,
+                awaiting_other: bool) -> InlineKeyboardMarkup:
+    if awaiting_other:
+        return _kb([[IB(text="↩️ К вариантам ответа", callback_data=f"ob:{entry_id}")],
+                    _entry_nav(entry_id)])
     selected = selected or []
     prefix = "t" if q.type == "multi" else "a"
     buttons = []
@@ -90,55 +91,70 @@ def question_kb(entry_id: int, step: int, q: Question, selected: list | None = N
         extra.append(IB(text="✍️ Другое", callback_data=f"o:{entry_id}:{step}"))
     extra.append(IB(text="Пропустить", callback_data=f"s:{entry_id}:{step}"))
     rows.append(extra)
-    rows.append([IB(text="✖️ Отменить запись", callback_data=f"x:{entry_id}")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    rows.append(_entry_nav(entry_id))
+    return _kb(rows)
 
 
-def start_record_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[IB(text=BTN_RECORD, callback_data="rec")]])
+def notes_kb(entry_id: int) -> InlineKeyboardMarkup:
+    return _kb([[IB(text="✅ Готово — сохранить запись", callback_data=f"d:{entry_id}")],
+                _entry_nav(entry_id)])
 
 
+# ---------------------------------------------------------------- выгрузка
 def export_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+    return _kb([
         [IB(text="За неделю", callback_data="e:week"),
          IB(text="За месяц", callback_data="e:month"),
          IB(text="За всё время", callback_data="e:all")],
         [IB(text="📊 CSV-таблица за всё время", callback_data="ec:all")],
+        [back()],
     ])
 
 
+# ---------------------------------------------------------------- настройки
 def settings_kb(paused: bool) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [IB(text="🔁 Частота", callback_data="set:freq"),
-         IB(text="🕘 Время", callback_data="set:time")],
-        [IB(text="🌍 Часовой пояс", callback_data="set:tz"),
-         IB(text="▶️ Возобновить опросы" if paused else "⏸ Приостановить опросы",
-            callback_data="set:pause")],
+    return _kb([
+        [IB(text="🔁 Частота", callback_data="go:freq"),
+         IB(text="🕘 Время", callback_data="go:time")],
+        [IB(text="🌍 Часовой пояс", callback_data="go:tz"),
+         IB(text="▶️ Возобновить" if paused else "⏸ Пауза", callback_data="set:pause")],
         [IB(text="🔔 Спросить сейчас", callback_data="set:now"),
-         IB(text="🗂 Последняя запись", callback_data="set:last")],
+         IB(text="🗂 Последняя запись", callback_data="go:last")],
+        [back()],
     ])
-
-
-FREQ_OPTIONS = {1: "Каждый день", 2: "Через день", 3: "Раз в 3 дня", 7: "Раз в неделю"}
 
 
 def freq_kb() -> InlineKeyboardMarkup:
     rows = _rows([IB(text=t, callback_data=f"set:int:{d}") for d, t in FREQ_OPTIONS.items()], 2)
-    rows.append([IB(text="⬅️ Назад", callback_data="set:back")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    rows.append([back("settings")])
+    return _kb(rows)
 
 
 def time_kb() -> InlineKeyboardMarkup:
     buttons = [IB(text=f"{h:02d}:00", callback_data=f"set:t:{h:02d}:00") for h in range(7, 24)]
     rows = _rows(buttons, 4)
-    rows.append([IB(text="⬅️ Назад", callback_data="set:back")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    rows.append([back("settings")])
+    return _kb(rows)
 
 
-def delete_kb(entry_id: int, confirm: bool = False) -> InlineKeyboardMarkup:
+def tz_kb(back_to: str) -> InlineKeyboardMarkup:
+    from .tz import TZ_CHOICES
+
+    rows = _rows([IB(text=label, callback_data=f"tz:{name}") for label, name in TZ_CHOICES], 2)
+    rows.append([IB(text="🕐 Другой — укажу, сколько у меня времени", callback_data="tz:other")])
+    rows.append([back(back_to)])
+    return _kb(rows)
+
+
+def tz_time_kb() -> InlineKeyboardMarkup:
+    return _kb([[back("tz")]])
+
+
+def last_entry_kb(entry_id: int | None, confirm: bool = False) -> InlineKeyboardMarkup:
+    if entry_id is None:
+        return _kb([[back("settings")]])
     if confirm:
-        return InlineKeyboardMarkup(inline_keyboard=[[
-            IB(text="Да, удалить", callback_data=f"del!:{entry_id}"),
-            IB(text="Нет", callback_data="delno"),
-        ]])
-    return InlineKeyboardMarkup(inline_keyboard=[[IB(text="🗑 Удалить запись", callback_data=f"del:{entry_id}")]])
+        return _kb([[IB(text="Да, удалить", callback_data=f"del!:{entry_id}"),
+                     IB(text="Нет", callback_data="go:last")]])
+    return _kb([[IB(text="🗑 Удалить запись", callback_data=f"del:{entry_id}")],
+                [back("settings")]])

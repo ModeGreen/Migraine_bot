@@ -41,10 +41,10 @@ async def main() -> None:
     dp.include_router(fallback_router)
 
     await bot.set_my_commands([
+        BotCommand(command="menu", description="Главное меню"),
         BotCommand(command="record", description="Записать приступ"),
         BotCommand(command="export", description="Выгрузить дневник"),
         BotCommand(command="settings", description="Настройки опросов"),
-        BotCommand(command="help", description="Как пользоваться"),
     ])
 
     background = asyncio.create_task(run_background(bot, db, cfg, qn, transcriber))

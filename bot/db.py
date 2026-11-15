@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS users (
     next_poll_at  TEXT,
     tz            TEXT,                    -- «Europe/Moscow» или «UTC+03:00»; NULL — пояс по умолчанию
     awaiting      TEXT,                    -- чего бот ждёт текстом вне записи: 'tz_time'
+    panel_msg_id  INTEGER,                 -- сообщение-«панель», которое бот редактирует
+    kb_removed    INTEGER NOT NULL DEFAULT 0, -- убрана ли reply-клавиатура старой версии
     created_at    TEXT    NOT NULL
 );
 
@@ -89,7 +91,8 @@ class DB:
     def _migrate(self) -> None:
         """Добавляет колонки, появившиеся в новых версиях, в уже существующую базу."""
         wanted = {
-            "users": {"tz": "TEXT", "awaiting": "TEXT"},
+            "users": {"tz": "TEXT", "awaiting": "TEXT", "panel_msg_id": "INTEGER",
+                      "kb_removed": "INTEGER NOT NULL DEFAULT 0"},
             "entries": {"q_message_id": "INTEGER"},
             "notes": {"status_msg_id": "INTEGER"},
         }

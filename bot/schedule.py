@@ -10,6 +10,7 @@ log = logging.getLogger(__name__)
 
 TICK_SECONDS = 30
 QUESTIONS_AUTOCLOSE = timedelta(hours=24)
+POLL_POSTPONE = timedelta(hours=1)
 
 
 def compute_next(user: dict, tz: ZoneInfo, after: datetime, extra_days: int = 0) -> datetime:
@@ -52,6 +53,10 @@ async def run_background(bot, db, cfg, qn, transcriber) -> None:
                     continue
                 try:
                     if now >= from_iso(user["next_poll_at"]):
+                        if db.open_entry(user["user_id"]):
+                            # Пользователь сейчас записывает приступ — не перебиваем, спросим через час
+                            db.update_user(user["user_id"], next_poll_at=to_iso(now + POLL_POSTPONE))
+                            continue
                         nxt = compute_next(user, cfg.tz, now, extra_days=max(0, user["interval_days"] - 1))
                         db.update_user(user["user_id"], next_poll_at=to_iso(nxt))
                         await send_poll(bot, db, cfg, user)
@@ -63,6 +68,9 @@ async def run_background(bot, db, cfg, qn, transcriber) -> None:
                 user = db.get_user(poll["user_id"])
                 if not user or user["user_id"] not in cfg.allowed_user_ids:
                     db.update_poll(poll["id"], remind_at=None)
+                    continue
+                if db.open_entry(user["user_id"]):
+                    db.update_poll(poll["id"], remind_at=to_iso(now + POLL_POSTPONE))
                     continue
                 try:
                     await send_poll(bot, db, cfg, user, poll_id=poll["id"])
@@ -79,14 +87,14 @@ async def run_background(bot, db, cfg, qn, transcriber) -> None:
                     db.close_entry(entry["id"])
                     continue
                 try:
-                    await finish_entry(bot, db, qn, cfg, user["chat_id"], entry["id"], auto=True)
+                    await finish_entry(bot, db, qn, cfg, user["user_id"], entry["id"], auto=True)
                 except Exception:  # noqa: BLE001
                     log.exception("Не удалось закрыть запись %s", entry["id"])
                     db.close_entry(entry["id"])
 
             # 4. Отложенные голосовые (ждали скачивания модели) и выгрузка Whisper из памяти
             if transcriber.ready and (voice_task is None or voice_task.done()) and db.queued_voice_notes():
-                voice_task = asyncio.create_task(process_queued_voice(bot, db, transcriber))
+                voice_task = asyncio.create_task(process_queued_voice(bot, db, qn, transcriber))
             await transcriber.unload_if_idle()
         except Exception:  # noqa: BLE001
             log.exception("Ошибка в фоновом цикле")
