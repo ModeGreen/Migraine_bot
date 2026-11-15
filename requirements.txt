@@ -1,0 +1,5 @@
+aiogram>=3.13,<4
+faster-whisper>=1.1,<2
+PyYAML>=6.0
+tzlocal>=5.2
+tzdata
