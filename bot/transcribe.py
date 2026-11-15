@@ -94,8 +94,10 @@ class Transcriber:
             raise RuntimeError("Модель Whisper ещё не скачана")
         async with self._lock:
             started = time.monotonic()
-            text = await asyncio.to_thread(self._run, path)
-            self._last_used = time.monotonic()
+            try:
+                text = await asyncio.to_thread(self._run, path)
+            finally:
+                self._last_used = time.monotonic()
             log.info("Расшифровано %s за %.1f с", path.name, self._last_used - started)
             return text
 
