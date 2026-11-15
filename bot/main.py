@@ -11,7 +11,9 @@ from aiogram.types import BotCommand
 
 from .config import load_config
 from .db import DB
+from . import handlers
 from .handlers import AccessMiddleware, fallback_router, router
+from .media import MenuImages
 from .questions import load_questions
 from .schedule import run_background
 from .transcribe import Transcriber
@@ -34,6 +36,8 @@ async def main() -> None:
         log.warning("ALLOWED_USER_IDS пуст — бот никого не пустит, но подскажет ID в ответ на сообщение.")
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    handlers.images = MenuImages(cfg.menu_dir, db)
+    log.info("Картинки меню: %s", cfg.menu_dir if cfg.menu_dir.is_dir() else "нет папки — меню будет текстом")
     dp = Dispatcher(db=db, cfg=cfg, qn=qn, transcriber=transcriber)
     dp.message.outer_middleware(AccessMiddleware())
     dp.callback_query.outer_middleware(AccessMiddleware())

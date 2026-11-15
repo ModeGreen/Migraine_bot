@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta, tzinfo
-from html import escape
+from html import escape, unescape
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -21,6 +21,7 @@ from aiogram.types import (
     CallbackQuery,
     ErrorEvent,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     Message,
     ReplyKeyboardRemove,
     TelegramObject,
@@ -30,6 +31,7 @@ from . import keyboards as kb
 from .config import Config
 from .db import DB, from_iso, now_utc, to_iso
 from .export import build_csv, build_markdown
+from .media import MenuImages
 from .questions import Question, Questionnaire
 from .schedule import compute_next
 from .transcribe import Transcriber
@@ -41,7 +43,7 @@ router = Router()
 # чтобы он не перехватывал команды и кнопки
 fallback_router = Router()
 
-Screen = tuple[str, InlineKeyboardMarkup]
+Screen = tuple[str, InlineKeyboardMarkup, str | None]  # текст, кнопки, картинка раздела
 WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
 
@@ -182,15 +184,31 @@ async def delete_incoming(message: Message) -> None:
         pass
 
 
+CAPTION_LIMIT = 1024          # лимит подписи к фото в Telegram
+images: MenuImages | None = None   # задаётся в main.py
+
+
+def _fit_caption(text: str) -> tuple[str, str | None]:
+    """Подпись к фото не длиннее 1024 символов. Если не влезает — без разметки и с обрезкой."""
+    if len(text) <= CAPTION_LIMIT:
+        return text, "HTML"
+    import re
+
+    plain = unescape(re.sub(r"<[^>]+>", "", text))
+    return plain[: CAPTION_LIMIT - 1] + "…", None
+
+
 async def show(bot: Bot, db: DB, uid: int, screen: Screen, *, new: bool = False,
                via: int | None = None) -> None:
     """Показывает экран в панели.
 
-    По умолчанию редактирует текущую панель (или сообщение `via`, на кнопку которого
-    нажали). С new=True присылает панель заново внизу чата — для опросов (нужно
-    уведомление) и после файлов выгрузки. Старая панель удаляется.
+    Панель — сообщение с картинкой раздела (или просто текст, если картинки нет).
+    По умолчанию панель редактируется на месте (editMessageMedia / editMessageCaption /
+    editMessageText), в том числе сообщение `via`, на кнопку которого нажали.
+    С new=True панель присылается заново внизу чата — для опросов (нужно уведомление)
+    и после файлов выгрузки. Старая панель удаляется.
     """
-    text, markup = screen
+    text, markup, img = screen
     user = db.get_user(uid)
     chat = user["chat_id"]
     if not user["kb_removed"]:
@@ -201,31 +219,54 @@ async def show(bot: Bot, db: DB, uid: int, screen: Screen, *, new: bool = False,
         except TelegramBadRequest:
             pass
         db.update_user(uid, kb_removed=1)
+
+    kind = "photo" if images and images.has(img) else "text"
+    caption, mode = _fit_caption(text) if kind == "photo" else (text, "HTML")
     panel = user["panel_msg_id"]
     target = via or panel
-    if target and not new:
+    known_kind = user["panel_kind"] if target == panel else None
+
+    if target and not new and (known_kind in (None, kind)):
         try:
-            await bot.edit_message_text(text=text, chat_id=chat, message_id=target, reply_markup=markup)
+            if kind == "text":
+                await bot.edit_message_text(text=text, chat_id=chat, message_id=target, reply_markup=markup)
+            elif target == panel and user["panel_img"] == img:
+                await bot.edit_message_caption(chat_id=chat, message_id=target, caption=caption,
+                                               parse_mode=mode, reply_markup=markup)
+            else:
+                msg = await bot.edit_message_media(
+                    chat_id=chat, message_id=target, reply_markup=markup,
+                    media=InputMediaPhoto(media=images.get(img), caption=caption, parse_mode=mode))
+                if isinstance(msg, Message) and msg.photo:
+                    images.remember(img, msg.photo[-1].file_id)
             edited = True
         except TelegramBadRequest as exc:
             edited = "not modified" in str(exc)
         if edited:
             if panel and panel != target:
                 await drop(bot, chat, panel)
-            db.update_user(uid, panel_msg_id=target)
+            db.update_user(uid, panel_msg_id=target, panel_kind=kind, panel_img=img if kind == "photo" else None)
             return
-    msg = await bot.send_message(chat, text, reply_markup=markup)
-    db.update_user(uid, panel_msg_id=msg.message_id)
+
+    if kind == "photo":
+        msg = await bot.send_photo(chat, images.get(img), caption=caption, parse_mode=mode, reply_markup=markup)
+        if msg.photo:
+            images.remember(img, msg.photo[-1].file_id)
+    else:
+        msg = await bot.send_message(chat, text, reply_markup=markup)
+    db.update_user(uid, panel_msg_id=msg.message_id, panel_kind=kind, panel_img=img if kind == "photo" else None)
     for old in {panel, via} - {None, msg.message_id}:
         await drop(bot, chat, old)
 
 
 # ================================================================ экраны
+# Оформление по мотивам «Зазеркалья»: бот — летопись, которую ведёт Летописный Артём.
+# Третий элемент экрана — картинка раздела из папки menu/.
 def main_screen(db: DB, cfg: Config, user: dict, note: str = "") -> Screen:
     user = db.get_user(user["user_id"])
     tz = utz(user, cfg)
     lines = [note, ""] if note else []
-    lines.append("💜 <b>Дневник головной боли</b>")
+    lines.append("🪞 <b>Летопись Зазеркалья</b>")
     if user["paused"]:
         lines.append("Опросы на паузе ⏸")
     else:
@@ -236,29 +277,28 @@ def main_screen(db: DB, cfg: Config, user: dict, note: str = "") -> Screen:
     if open_entry:
         lines.append("\n✏️ Есть незаконченная запись — её можно продолжить.")
     if not user.get("tz"):
-        lines.append("\n🌍 Укажи часовой пояс, чтобы опросы приходили в нужное время.")
-    return "\n".join(lines), kb.main_kb(bool(open_entry), not user.get("tz"))
+        lines.append("\n🌍 Укажи часовой пояс, чтобы опрос приходил вовремя.")
+    return "\n".join(lines), kb.main_kb(bool(open_entry), not user.get("tz")), "main"
 
 
 def help_text(user: dict) -> str:
     return (
-        f"• Я регулярно спрашиваю, болела ли голова (сейчас — {describe_schedule(user)}).\n"
-        "• Если болит прямо сейчас — «🤕 Записать приступ», не дожидаясь опроса.\n"
-        "• На вопросы отвечай кнопками или просто напиши ответ. В конце можно написать "
-        "или надиктовать голосом всё, что важно, — сколько угодно сообщений.\n"
-        "• Твои сообщения я сохраняю в дневник и убираю из чата, чтобы не копился мусор.\n"
-        "• «📤 Выгрузка» — файл с дневником, его можно отдать врачу или нейросети.\n"
-        "• «⚙️ Настройки» — частота и время опросов, часовой пояс, пауза.\n"
-        "• Кнопка «⬅️ Назад» возвращает на шаг назад, «🏠 Меню» — в главное меню."
+        f"• Время от времени спрошу, кокало ли голову (сейчас — {describe_schedule(user)}).\n"
+        "• Кокнуло прямо сейчас — жми «🤕 Кокнуло», не жди опроса.\n"
+        "• Отвечай кнопками или просто пиши. В конце расскажи текстом или голосом всё, что важно.\n"
+        "• Твои сообщения я заношу в летопись и убираю из чата.\n"
+        "• «📜 Летопись» — файл для врача или нейросети.\n"
+        "• «⬅️ Назад» — шаг назад, «🏠 Меню» — в главное меню."
     )
 
 
 def help_screen(user: dict) -> Screen:
-    return "❓ <b>Как пользоваться</b>\n\n" + help_text(user), kb.help_kb()
+    return "🌲 <b>Опушка</b> · как тут всё устроено\n\n" + help_text(user), kb.help_kb(), "welcome"
 
 
 def export_screen() -> Screen:
-    return "📤 <b>Выгрузка дневника</b>\n\nЗа какой период?", kb.export_kb()
+    return ("📜 <b>У Летописного Артёма</b>\n\nЗа какой период выгрузить летопись?",
+            kb.export_kb(), "export")
 
 
 def settings_screen(cfg: Config, user: dict, note: str = "") -> Screen:
@@ -268,40 +308,50 @@ def settings_screen(cfg: Config, user: dict, note: str = "") -> Screen:
     tz_text = tz_label(tz) + ("" if user.get("tz") else " — по умолчанию, лучше указать свой")
     head = f"{note}\n\n" if note else ""
     return (
-        f"{head}<b>⚙️ Настройки</b>\n\n"
+        f"{head}⚙️ <b>Настройки</b> · лаборатория Игоря Диода\n\n"
         f"Опрос: {describe_schedule(user)}\n"
         f"Статус: {status}\n"
         f"Часовой пояс: {tz_text}",
         kb.settings_kb(bool(user["paused"])),
+        "settings",
     )
+
+
+def freq_screen() -> Screen:
+    return "🍄 <b>Время от времени</b>\n\nКак часто спрашивать?", kb.freq_kb(), "time"
+
+
+def time_screen() -> Screen:
+    return "🍄 <b>Время от времени</b>\n\nВо сколько спрашивать?", kb.time_kb(), "time"
 
 
 def tz_screen(user: dict, welcome: bool = False) -> Screen:
     text = ""
     if welcome:
-        text = ("Привет! Я веду дневник головной боли 💜\n\n"
+        text = ("🌲 <b>Добро пожаловать на опушку</b>\n"
+                "Здесь ведётся летопись твоей головы.\n\n"
                 f"{help_text(user)}\n\n"
-                "Для начала — один вопрос, чтобы опросы приходили в правильное время.\n\n")
-    text += ("🌍 <b>Какой у тебя часовой пояс?</b>\n\n"
-             "Выбери город с тем же временем, что у тебя.\n"
-             "Или отправь геопозицию: 📎 → «Геопозиция» — я определю по ней только пояс, "
+                "Для начала один вопрос — чтобы опрос приходил вовремя.\n\n")
+    text += ("🌍 <b>Какой у тебя часовой пояс?</b>\n"
+             "Выбери город с тем же временем, что у тебя. "
+             "Или отправь геопозицию: 📎 → «Геопозиция» — по ней определю только пояс, "
              "координаты не сохраняются.")
-    return text, kb.tz_kb("settings" if user.get("tz") else "main")
+    return text, kb.tz_kb("settings" if user.get("tz") else "main"), "welcome" if welcome else "time"
 
 
 def tz_time_screen(note: str = "") -> Screen:
     head = f"{note}\n\n" if note else ""
     return (f"{head}🕐 Напиши, сколько у тебя сейчас времени, например <code>14:35</code> — "
-            "я сама вычислю часовой пояс.", kb.tz_time_kb())
+            "я сама вычислю часовой пояс.", kb.tz_time_kb(), "time")
 
 
 def last_entry_screen(db: DB, qn: Questionnaire, cfg: Config, user: dict, confirm: bool = False) -> Screen:
     entry = db.last_entry(user["user_id"])
     if not entry:
-        return "🗂 Записей о приступах пока нет.", kb.last_entry_kb(None)
-    tail = ("\n\n<b>Удалить эту запись?</b> Это нельзя отменить." if confirm
-            else "\n\nЕсли запись ошибочная — удали её и запиши заново.")
-    return entry_summary(entry, db, qn, cfg) + tail, kb.last_entry_kb(entry["id"], confirm)
+        return "⛏ В летописи пока нет ни одного приступа.", kb.last_entry_kb(None), "delete"
+    tail = ("\n\n<b>Закопать эту запись?</b> Откопать будет нельзя." if confirm
+            else "\n\nЕсли запись ошибочная — Дед Ченя её закопает, а ты запишешь заново.")
+    return entry_summary(entry, db, qn, cfg) + tail, kb.last_entry_kb(entry["id"], confirm), "delete"
 
 
 def poll_screen(db: DB, cfg: Config, user: dict, poll_id: int) -> Screen:
@@ -311,13 +361,13 @@ def poll_screen(db: DB, cfg: Config, user: dict, poll_id: int) -> Screen:
     recorded = len(db.entries_between(uid, from_iso(since), now_utc()))
     since_txt = fmt_local(since, utz(user, cfg), True)
     if recorded:
-        text = (f"🔔 С прошлого опроса ({since_txt}) записано приступов: {recorded}.\n"
-                "<b>Был ли ещё приступ, который не записан?</b>")
+        text = (f"🐾 <b>Постой!</b>\nС прошлого опроса ({since_txt}) записано приступов: {recorded}.\n"
+                "<b>Кокало ещё, но не записано?</b>")
     elif prev:
-        text = f"🔔 <b>Болела ли голова с прошлого опроса ({since_txt})?</b>"
+        text = f"🐾 <b>Постой!</b>\nГолову кокало с прошлого опроса ({since_txt})?"
     else:
-        text = f"🔔 <b>Болела ли голова с начала ведения дневника ({since_txt})?</b>"
-    return text, kb.poll_kb(poll_id)
+        text = f"🐾 <b>Постой!</b>\nГолову кокало с начала летописи ({since_txt})?"
+    return text, kb.poll_kb(poll_id), "poll"
 
 
 def entry_screen(db: DB, qn: Questionnaire, entry: dict, extra: str = "") -> Screen:
@@ -326,7 +376,7 @@ def entry_screen(db: DB, qn: Questionnaire, entry: dict, extra: str = "") -> Scr
     if entry["stage"] == "questions" and entry["step"] < len(qn):
         step = entry["step"]
         q = qn.questions[step]
-        lines = [f"🤕 <b>Запись приступа</b> · вопрос {step + 1} из {len(qn)}"]
+        lines = [f"🤕 <b>Если тебя кокнули…</b> · вопрос {step + 1} из {len(qn)}"]
         done = answers_lines(entry, qn, upto=step)
         if done:
             lines += ["", *done]
@@ -336,17 +386,18 @@ def entry_screen(db: DB, qn: Questionnaire, entry: dict, extra: str = "") -> Scr
         if awaiting:
             lines.append("\n✍️ Напиши свой ответ текстом или запиши голосовое.")
         return "\n".join(lines) + tail, kb.question_kb(
-            entry["id"], step, q, selected if isinstance(selected, list) else None, awaiting)
+            entry["id"], step, q, selected if isinstance(selected, list) else None, awaiting), "entry"
 
-    lines = ["🤕 <b>Запись приступа</b> · заметки"]
+    lines = ["📜 <b>Летописный Артём записывает</b>"]
     done = answers_lines(entry, qn)
     if done:
         lines += ["", *done]
     lines += ["", escape(qn.final_text)]
     notes = db.notes_for(entry["id"])
     if notes:
-        lines += ["", f"<b>Сохранено ({len(notes)}):</b>"]
-        shown = notes[-8:]
+        # подпись к фото ограничена 1024 символами — показываем только последние заметки
+        lines += ["", f"<b>В летописи ({len(notes)}):</b>"]
+        shown = notes[-3:]
         if len(notes) > len(shown):
             lines.append(f"… и ещё {len(notes) - len(shown)}")
         for n in shown:
@@ -355,11 +406,11 @@ def entry_screen(db: DB, qn: Questionnaire, entry: dict, extra: str = "") -> Scr
                     "pending": "расшифровываю…",
                     "queued": "сохранено, расшифрую позже",
                     "failed": "не удалось расшифровать, голосовое сохранено",
-                }.get(n["status"]) or trunc(n["text"] or "", 150)
+                }.get(n["status"]) or trunc(n["text"] or "", 70)
                 lines.append(f"🎙 {escape(body)}")
             else:
-                lines.append(f"📝 {escape(trunc(n['text'] or '', 150))}")
-    return "\n".join(lines) + tail, kb.notes_kb(entry["id"])
+                lines.append(f"📝 {escape(trunc(n['text'] or '', 70))}")
+    return "\n".join(lines) + tail, kb.notes_kb(entry["id"]), "notes"
 
 
 # ================================================================ навигация
@@ -376,8 +427,8 @@ async def on_nav(cb: CallbackQuery, bot: Bot, db: DB, cfg: Config, qn: Questionn
         "help": lambda: help_screen(user),
         "export": export_screen,
         "settings": lambda: settings_screen(cfg, user),
-        "freq": lambda: ("🔁 <b>Как часто спрашивать?</b>", kb.freq_kb()),
-        "time": lambda: ("🕘 <b>Во сколько спрашивать?</b>", kb.time_kb()),
+        "freq": freq_screen,
+        "time": time_screen,
         "tz": lambda: tz_screen(user),
         "last": lambda: last_entry_screen(db, qn, cfg, user),
     }
@@ -464,7 +515,7 @@ async def on_poll_answer(cb: CallbackQuery, bot: Bot, db: DB, cfg: Config, qn: Q
     now = now_utc()
     if action == "no":
         db.update_poll(poll["id"], status="no", answered_at=to_iso(now), remind_at=None)
-        await show(bot, db, uid, main_screen(db, cfg, user, "🙂 Записала: голова не болела. Хорошего дня!"),
+        await show(bot, db, uid, main_screen(db, cfg, user, "🙂 В летописи: голову не кокало. Хорошего дня!"),
                    via=via)
     elif action == "later":
         remind = now + timedelta(minutes=cfg.snooze_minutes)
@@ -484,7 +535,7 @@ async def start_entry(bot: Bot, db: DB, qn: Questionnaire, cfg: Config, user: di
     old = db.open_entry(uid)
     if old:
         db.close_entry(old["id"])
-        extra = (extra + "\n" if extra else "") + "Предыдущая незаконченная запись сохранена как есть."
+        extra = (extra + "\n" if extra else "") + "Предыдущая незаконченная запись занесена в летопись как есть."
     entry_id = db.create_entry(uid, poll_id)
     await show(bot, db, uid, entry_screen(db, qn, db.get_entry(entry_id), extra), via=via, new=new)
     return entry_id
@@ -496,8 +547,8 @@ async def finish_entry(bot: Bot, db: DB, qn: Questionnaire, cfg: Config, uid: in
     if not entry:
         return
     db.close_entry(entry_id)
-    head = ("💾 Запись закрыта автоматически — давно не было новых сообщений. Сохранено ✅"
-            if auto else "✅ Запись сохранена")
+    head = ("💾 Артём сам закрыл запись — давно не было новых сообщений. Занесено в летопись ✅"
+            if auto else "✅ Занесено в летопись")
     note = f"{head}\n\n{entry_summary(db.get_entry(entry_id), db, qn, cfg)}"
     await show(bot, db, uid, main_screen(db, cfg, db.get_user(uid), note), via=via)
 
@@ -666,7 +717,7 @@ async def cancel_entry(bot: Bot, db: DB, cfg: Config, user: dict, entry: dict, v
         # Запись начали из опроса — возвращаем к опросу, чтобы ответить заново
         db.update_poll(poll["id"], status="pending", answered_at=None)
         return await send_poll(bot, db, cfg, user, poll_id=poll["id"], via=via)
-    await show(bot, db, user["user_id"], main_screen(db, cfg, user, "Запись отменена, ничего не сохранила."),
+    await show(bot, db, user["user_id"], main_screen(db, cfg, user, "Запись отменена, в летопись ничего не попало."),
                via=via)
 
 
@@ -701,7 +752,7 @@ async def on_export(cb: CallbackQuery, bot: Bot, db: DB, cfg: Config, qn: Questi
                "Что стоит обсудить с неврологом?»")
     await bot.send_document(user["chat_id"], BufferedInputFile(data, filename=filename), caption=caption)
     # Файл остаётся в чате, а панель переезжает под него
-    await show(bot, db, user["user_id"], main_screen(db, cfg, user, "📎 Дневник — файлом выше."), new=True)
+    await show(bot, db, user["user_id"], main_screen(db, cfg, user, "📎 Летопись — файлом выше."), new=True)
 
 
 # ================================================================ настройки
@@ -749,7 +800,7 @@ async def on_delete(cb: CallbackQuery, bot: Bot, db: DB, cfg: Config, qn: Questi
         return await show(bot, db, uid, last_entry_screen(db, qn, cfg, user, confirm=True), via=via)
     for f in db.delete_entry(entry["id"]):
         Path(f).unlink(missing_ok=True)
-    await show(bot, db, uid, settings_screen(cfg, user, "🗑 Запись удалена."), via=via)
+    await show(bot, db, uid, settings_screen(cfg, user, "⛏ Запись закопана."), via=via)
 
 
 # ================================================================ часовой пояс
@@ -785,9 +836,9 @@ async def on_location(message: Message, bot: Bot, db: DB, cfg: Config, user: dic
         log.exception("Не удалось определить пояс по геопозиции")
         name = None
     if not name:
-        text, markup = tz_screen(user)
+        text, markup, img = tz_screen(user)
         return await show(bot, db, user["user_id"],
-                          ("Не получилось определить пояс по геопозиции.\n\n" + text, markup))
+                          ("Не получилось определить пояс по геопозиции.\n\n" + text, markup, img))
     await apply_timezone(bot, db, cfg, user, name)
 
 
@@ -860,7 +911,7 @@ async def on_voice(message: Message, bot: Bot, db: DB, cfg: Config, qn: Question
         db.add_note(entry["id"], "voice", file_path=str(path), status="ok" if not transcriber.enabled else "queued")
         why = ("расшифровка отключена" if not transcriber.enabled
                else "модель для расшифровки ещё готовится, расшифрую позже")
-        extra = f"🎙 Голосовое сохранено в заметки ({why})."
+        extra = f"🎙 Голосовое занесено в летопись ({why})."
         if entry["stage"] == "questions":
             extra += " На вопрос ответь кнопкой или текстом."
         return await show(bot, db, uid, entry_screen(db, qn, entry, extra))
@@ -879,7 +930,7 @@ async def on_voice(message: Message, bot: Bot, db: DB, cfg: Config, qn: Question
         extra = "" if text else "⚠️ Не получилось расшифровать голосовое, но оно сохранено."
         return await show(bot, db, uid, entry_screen(db, qn, entry, extra))
 
-    extra = "🎙 Голосовое сохранено в заметки к этой записи." if started_here else ""
+    extra = "🎙 Голосовое занесено в летопись этой записи." if started_here else ""
     await show(bot, db, uid, entry_screen(db, qn, entry, extra))
     await transcribe_note(transcriber, db, note_id, path)
     if entry["stage"] == "notes":
@@ -915,7 +966,7 @@ async def on_text(message: Message, bot: Bot, db: DB, cfg: Config, qn: Questionn
 
     if not entry:
         return await open_main(message, bot, db, cfg, user,
-                               "Сейчас нет открытой записи. Если болит голова — нажми «🤕 Записать приступ».")
+                               "Сейчас нет открытой записи. Если кокнуло — жми «🤕 Кокнуло».")
     if entry["stage"] == "questions":
         q = qn.questions[entry["step"]]
         save_answer(db, qn, entry, q, text_answer_value(entry, q, text))

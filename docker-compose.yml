@@ -14,6 +14,7 @@ services:
     volumes:
       - ./data:/app/data                        # база, голосовые, бэкапы, модель Whisper
       - ./questions.yaml:/app/questions.yaml:ro # вопросы можно править без пересборки
+      - ./menu:/app/menu:ro                     # картинки разделов меню (необязательно)
       - /etc/localtime:/etc/localtime:ro        # пояс по умолчанию — как у сервера
     logging:
       driver: json-file

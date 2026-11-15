@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS users (
     tz            TEXT,                    -- «Europe/Moscow» или «UTC+03:00»; NULL — пояс по умолчанию
     awaiting      TEXT,                    -- чего бот ждёт текстом вне записи: 'tz_time'
     panel_msg_id  INTEGER,                 -- сообщение-«панель», которое бот редактирует
+    panel_kind    TEXT,                    -- 'photo' | 'text' — тип сообщения-панели
+    panel_img     TEXT,                    -- какая картинка раздела сейчас на панели
     kb_removed    INTEGER NOT NULL DEFAULT 0, -- убрана ли reply-клавиатура старой версии
     created_at    TEXT    NOT NULL
 );
@@ -61,6 +63,13 @@ CREATE TABLE IF NOT EXISTS notes (
     status_msg_id INTEGER                   -- сообщение «🎙 …», которое обновится расшифровкой
 );
 
+-- file_id картинок меню в Telegram; sig — подпись файла, чтобы сбросить кэш при замене
+CREATE TABLE IF NOT EXISTS media_cache (
+    name    TEXT PRIMARY KEY,
+    sig     TEXT NOT NULL,
+    file_id TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_polls_user   ON polls(user_id, sent_at);
 CREATE INDEX IF NOT EXISTS idx_entries_user ON entries(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notes_entry  ON notes(entry_id);
@@ -92,7 +101,8 @@ class DB:
         """Добавляет колонки, появившиеся в новых версиях, в уже существующую базу."""
         wanted = {
             "users": {"tz": "TEXT", "awaiting": "TEXT", "panel_msg_id": "INTEGER",
-                      "kb_removed": "INTEGER NOT NULL DEFAULT 0"},
+                      "kb_removed": "INTEGER NOT NULL DEFAULT 0", "panel_kind": "TEXT",
+                      "panel_img": "TEXT"},
             "entries": {"q_message_id": "INTEGER"},
             "notes": {"status_msg_id": "INTEGER"},
         }
@@ -125,6 +135,14 @@ class DB:
         for old in sorted(backup_dir.glob("diary-*.sqlite3"))[:-keep]:
             old.unlink()
         return target
+
+    # ---------- media ----------
+    def get_media(self, name: str) -> dict | None:
+        return self._one("SELECT * FROM media_cache WHERE name=?", (name,))
+
+    def set_media(self, name: str, sig: str, file_id: str) -> None:
+        self._exec("INSERT OR REPLACE INTO media_cache(name, sig, file_id) VALUES (?,?,?)",
+                   (name, sig, file_id))
 
     # ---------- users ----------
     def get_user(self, user_id: int) -> dict | None:

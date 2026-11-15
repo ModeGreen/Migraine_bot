@@ -40,6 +40,10 @@ class Config:
     snooze_minutes: int
 
     @property
+    def menu_dir(self) -> Path:
+        return Path(os.environ.get("MENU_DIR", "menu")).resolve()
+
+    @property
     def db_path(self) -> Path:
         return self.data_dir / "diary.sqlite3"
 

@@ -46,8 +46,8 @@ def main_kb(has_open_entry: bool, need_tz: bool) -> InlineKeyboardMarkup:
         rows.append([IB(text="🌍 Указать часовой пояс", callback_data="go:tz")])
     if has_open_entry:
         rows.append([IB(text="▶️ Продолжить запись", callback_data="go:entry")])
-    rows.append([IB(text="🤕 Записать приступ", callback_data="rec")])
-    rows.append([IB(text="📤 Выгрузка", callback_data="go:export"),
+    rows.append([IB(text="🤕 Кокнуло — записать приступ", callback_data="rec")])
+    rows.append([IB(text="📜 Летопись", callback_data="go:export"),
                  IB(text="⚙️ Настройки", callback_data="go:settings")])
     return _kb(rows)
 
@@ -59,8 +59,8 @@ def help_kb() -> InlineKeyboardMarkup:
 # ---------------------------------------------------------------- опрос
 def poll_kb(poll_id: int) -> InlineKeyboardMarkup:
     return _kb([
-        [IB(text="Нет 🙂", callback_data=f"p:{poll_id}:no"),
-         IB(text="Да 🤕", callback_data=f"p:{poll_id}:yes")],
+        [IB(text="Нет, не кокало 🙂", callback_data=f"p:{poll_id}:no"),
+         IB(text="Да, кокнуло 🤕", callback_data=f"p:{poll_id}:yes")],
         [IB(text="⏰ Спроси позже", callback_data=f"p:{poll_id}:later"), back(text=HOME)],
     ])
 
@@ -95,7 +95,7 @@ def question_kb(entry_id: int, step: int, q: Question, selected: list | None,
 
 
 def notes_kb(entry_id: int) -> InlineKeyboardMarkup:
-    return _kb([[IB(text="✅ Готово — сохранить запись", callback_data=f"d:{entry_id}")],
+    return _kb([[IB(text="✅ Готово — в летопись", callback_data=f"d:{entry_id}")],
                 _entry_nav(entry_id)])
 
 
@@ -105,7 +105,7 @@ def export_kb() -> InlineKeyboardMarkup:
         [IB(text="За неделю", callback_data="e:week"),
          IB(text="За месяц", callback_data="e:month"),
          IB(text="За всё время", callback_data="e:all")],
-        [IB(text="📊 CSV-таблица за всё время", callback_data="ec:all")],
+        [IB(text="📊 Таблица CSV за всё время", callback_data="ec:all")],
         [back()],
     ])
 
@@ -153,7 +153,7 @@ def last_entry_kb(entry_id: int | None, confirm: bool = False) -> InlineKeyboard
     if entry_id is None:
         return _kb([[back("settings")]])
     if confirm:
-        return _kb([[IB(text="Да, удалить", callback_data=f"del!:{entry_id}"),
+        return _kb([[IB(text="Да, закопать", callback_data=f"del!:{entry_id}"),
                      IB(text="Нет", callback_data="go:last")]])
-    return _kb([[IB(text="🗑 Удалить запись", callback_data=f"del:{entry_id}")],
+    return _kb([[IB(text="⛏ Закопать запись (удалить)", callback_data=f"del:{entry_id}")],
                 [back("settings")]])
