@@ -9,6 +9,20 @@ from aiogram.types import (
 
 from .questions import Question
 
+def _norm(text: str | None) -> str:
+    """Убирает невидимые селекторы вариантов эмодзи (U+FE0E/U+FE0F) и лишние пробелы:
+    разные клиенты Telegram присылают текст кнопки «⚙️ Настройки» по-разному."""
+    return " ".join((text or "").replace("️", "").replace("︎", "").split())
+
+
+def is_btn(button: str):
+    """Фильтр aiogram: сообщение — нажатие на кнопку reply-клавиатуры `button`."""
+    from aiogram import F
+
+    target = _norm(button)
+    return F.text.func(lambda t: _norm(t) == target)
+
+
 BTN_RECORD = "🤕 Записать приступ"
 BTN_EXPORT = "📤 Выгрузка"
 BTN_SETTINGS = "⚙️ Настройки"

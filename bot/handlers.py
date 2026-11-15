@@ -30,6 +30,9 @@ from .tz import TZ_CHOICES, tz_from_local_time, tz_from_location, tz_label, user
 
 log = logging.getLogger(__name__)
 router = Router()
+# Свободный текст — в отдельном роутере, который подключается последним,
+# чтобы он не перехватывал нажатия кнопок меню
+fallback_router = Router()
 
 
 # ---------------------------------------------------------------- доступ
@@ -91,6 +94,9 @@ async def on_error(event: ErrorEvent) -> bool:
         except TelegramBadRequest:
             pass
     return True
+
+
+fallback_router.error()(on_error)
 
 
 # ---------------------------------------------------------------- вспомогательное
@@ -461,12 +467,12 @@ async def on_location(message: Message, db: DB, cfg: Config, user: dict):
     await set_timezone(message, db, cfg, user, name)
 
 
-@router.message(F.text == kb.BTN_TZ_LIST)
+@router.message(kb.is_btn(kb.BTN_TZ_LIST))
 async def on_tz_list(message: Message):
     await message.answer("Выбери город с тем же временем, что у тебя:", reply_markup=kb.tz_list_kb())
 
 
-@router.message(F.text == kb.BTN_TZ_LATER)
+@router.message(kb.is_btn(kb.BTN_TZ_LATER))
 async def on_tz_later(message: Message, cfg: Config, user: dict):
     await message.answer(
         f"Хорошо, пока буду считать время по поясу {tz_label(utz(user, cfg))}. "
@@ -518,13 +524,13 @@ async def cmd_help(message: Message, cfg: Config, user: dict):
 
 
 @router.message(Command("record"))
-@router.message(F.text == kb.BTN_RECORD)
+@router.message(kb.is_btn(kb.BTN_RECORD))
 async def on_record(message: Message, bot: Bot, db: DB, qn: Questionnaire, user: dict):
     await start_entry(bot, db, qn, user)
 
 
 @router.message(Command("export"))
-@router.message(F.text == kb.BTN_EXPORT)
+@router.message(kb.is_btn(kb.BTN_EXPORT))
 async def on_export_menu(message: Message):
     await message.answer("За какой период выгрузить дневник?", reply_markup=kb.export_kb())
 
@@ -542,7 +548,7 @@ async def on_export(cb: CallbackQuery, db: DB, cfg: Config, qn: Questionnaire, u
     await cb.message.answer_document(BufferedInputFile(data, filename=filename), caption=caption)
 
 
-@router.message(F.text == kb.BTN_DONE)
+@router.message(kb.is_btn(kb.BTN_DONE))
 async def on_done(message: Message, bot: Bot, db: DB, cfg: Config, qn: Questionnaire, user: dict):
     entry = db.open_entry(user["user_id"])
     if not entry:
@@ -562,7 +568,7 @@ async def answer_with_text(bot: Bot, db: DB, qn: Questionnaire, entry: dict, tex
     await _answered(bot, db, qn, None, entry, step, q, value, chat_id)
 
 
-@router.message(F.text & ~F.text.startswith("/"))
+@fallback_router.message(F.text & ~F.text.startswith("/"))
 async def on_text(message: Message, bot: Bot, db: DB, cfg: Config, qn: Questionnaire, user: dict):
     if user.get("awaiting") == "tz_time":
         name = tz_from_local_time(message.text, now_utc())
@@ -600,7 +606,7 @@ def settings_text(user: dict, cfg: Config) -> str:
 
 
 @router.message(Command("settings"))
-@router.message(F.text == kb.BTN_SETTINGS)
+@router.message(kb.is_btn(kb.BTN_SETTINGS))
 async def on_settings(message: Message, cfg: Config, user: dict):
     await message.answer(settings_text(user, cfg), reply_markup=kb.settings_kb(bool(user["paused"])))
 

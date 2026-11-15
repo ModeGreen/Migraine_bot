@@ -12,7 +12,7 @@ from aiogram.types import BotCommand
 
 from .config import load_config
 from .db import DB
-from .handlers import AccessMiddleware, router, transcribe_note
+from .handlers import AccessMiddleware, fallback_router, router, transcribe_note
 from .questions import load_questions
 from .schedule import run_background
 from .transcribe import Transcriber
@@ -49,6 +49,7 @@ async def main() -> None:
     dp.message.outer_middleware(AccessMiddleware())
     dp.callback_query.outer_middleware(AccessMiddleware())
     dp.include_router(router)
+    dp.include_router(fallback_router)
 
     await bot.set_my_commands([
         BotCommand(command="record", description="Записать приступ"),
